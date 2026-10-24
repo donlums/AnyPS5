@@ -2716,14 +2716,17 @@ void requireImportServesGuest(const Context& context, Recorder& recorder, const 
     Require(begin >= import.base && end <= import.base + import.bytes, what + " is not inside its import");
     const auto collected = CollectWritesUncached(begin, bytes);
 #ifdef _WIN32
-    if (expectCompared) {
+    const auto requireComparedPages = [&] {
         std::vector<void*> pages(bytes / page);
         std::size_t count = pages.size();
         GuestArena::GuestArenaComparedPages_nid_no_patch(begin, bytes, pages.data(), &count);
-        Require(collected == 0 && !Watched(begin, bytes), what + " unexpectedly remained write-watched after its resident memory was shared");
         Require(count == pages.size(), what + " has guest pages outside the comparison fallback");
         for (std::size_t index = 0; index < count; ++index)
             Require(pages[index] == reinterpret_cast<void*>(begin + index * page), what + " has a gap in its compared pages");
+    };
+    if (expectCompared) {
+        Require(collected == 0 && !Watched(begin, bytes), what + " unexpectedly remained write-watched after its resident memory was shared");
+        requireComparedPages();
     } else
 #else
     static_cast<void>(expectCompared);
@@ -2734,12 +2737,25 @@ void requireImportServesGuest(const Context& context, Recorder& recorder, const 
     }
     auto* first = reinterpret_cast<std::byte*>(begin);
     auto* last = reinterpret_cast<std::byte*>(end - page);
+#ifdef _WIN32
+    std::array<std::byte, probe> firstBefore{};
+    std::array<std::byte, probe> lastBefore{};
+    if (expectCompared) {
+        std::copy_n(first, probe, firstBefore.begin());
+        std::copy_n(last, probe, lastBefore.begin());
+        Require(CompareMapped(begin, firstBefore) == Compare::Equal && CompareMapped(end - page, lastBefore) == Compare::Equal, what + " cannot compare the original guest bytes");
+    }
+#endif
     for (std::size_t index = 0; index < probe; ++index) {
         first[index] = static_cast<std::byte>((index * 7u + salt) & 0xffu);
         last[index] = static_cast<std::byte>((index * 13u + salt * 5u + 1u) & 0xffu);
     }
 #ifdef _WIN32
-    if (!expectCompared)
+    if (expectCompared) {
+        Require(CompareMapped(begin, firstBefore) == Compare::Differs && CompareMapped(end - page, lastBefore) == Compare::Differs, "a CPU store into " + what + " was not detected by comparison");
+        Require(!Watched(begin, bytes) && CollectWritesUncached(begin, bytes) == 0, what + " unexpectedly changed from comparison tracking after a CPU store");
+        requireComparedPages();
+    } else
 #endif
         Require(!UnchangedSinceCollected(begin, page, collected) && !UnchangedSinceCollected(end - page, page, collected), "a CPU store into " + what + " was not collected");
     Buffer readback(context, 2 * probe, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
