@@ -2708,22 +2708,40 @@ void secondMappingImportTests(const Device& device) {
     HostImportFor(context, address, bytes);
 }
 
-void requireImportServesGuest(const Context& context, Recorder& recorder, const HostImport& import, std::uint64_t begin, std::uint64_t end, std::uint32_t salt, const std::string& what) {
+void requireImportServesGuest(const Context& context, Recorder& recorder, const HostImport& import, std::uint64_t begin, std::uint64_t end, std::uint32_t salt, const std::string& what, bool expectCompared = false) {
     using namespace AgcDriver::GuestMemory;
     constexpr std::size_t page = 4096;
     constexpr std::size_t probe = 256;
     const auto bytes = static_cast<std::size_t>(end - begin);
     Require(begin >= import.base && end <= import.base + import.bytes, what + " is not inside its import");
     const auto collected = CollectWritesUncached(begin, bytes);
-    Require(collected != 0 && Watched(begin, bytes), what + " left the write watch");
-    Require(UnchangedSinceCollected(begin, page, collected) && UnchangedSinceCollected(end - page, page, collected), what + " reports writes nobody made");
+#ifdef _WIN32
+    if (expectCompared) {
+        std::vector<void*> pages(bytes / page);
+        std::size_t count = pages.size();
+        GuestArena::GuestArenaComparedPages_nid_no_patch(begin, bytes, pages.data(), &count);
+        Require(collected == 0 && !Watched(begin, bytes), what + " unexpectedly remained write-watched after its resident memory was shared");
+        Require(count == pages.size(), what + " has guest pages outside the comparison fallback");
+        for (std::size_t index = 0; index < count; ++index)
+            Require(pages[index] == reinterpret_cast<void*>(begin + index * page), what + " has a gap in its compared pages");
+    } else
+#else
+    static_cast<void>(expectCompared);
+#endif
+    {
+        Require(collected != 0 && Watched(begin, bytes), what + " left the write watch");
+        Require(UnchangedSinceCollected(begin, page, collected) && UnchangedSinceCollected(end - page, page, collected), what + " reports writes nobody made");
+    }
     auto* first = reinterpret_cast<std::byte*>(begin);
     auto* last = reinterpret_cast<std::byte*>(end - page);
     for (std::size_t index = 0; index < probe; ++index) {
         first[index] = static_cast<std::byte>((index * 7u + salt) & 0xffu);
         last[index] = static_cast<std::byte>((index * 13u + salt * 5u + 1u) & 0xffu);
     }
-    Require(!UnchangedSinceCollected(begin, page, collected) && !UnchangedSinceCollected(end - page, page, collected), "a CPU store into " + what + " was not collected");
+#ifdef _WIN32
+    if (!expectCompared)
+#endif
+        Require(!UnchangedSinceCollected(begin, page, collected) && !UnchangedSinceCollected(end - page, page, collected), "a CPU store into " + what + " was not collected");
     Buffer readback(context, 2 * probe, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     const auto commands = recorder.Commands();
     RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
@@ -2890,17 +2908,18 @@ int hostImportCutTests(const Device& device) {
         std::size_t offset;
         std::size_t length;
         bool unmap;
+        bool expectCompared;
         std::size_t kept;
         std::size_t keptEnd;
         std::size_t smaller;
         std::size_t smallerEnd;
     };
     constexpr std::array<Case, 5> cases{{
-        {"a page made inaccessible inside the import, nearer its start", inside + guard, guard, false, inside + 2 * guard, bytes, 0, inside + guard},
-        {"a page made inaccessible inside the import, nearer its end", bytes - inside - 2 * guard, guard, false, 0, bytes - inside - 2 * guard, bytes - inside - guard, bytes},
-        {"an unmap of a 2 MiB run inside the import", inside, run, true, inside + run, bytes, 0, inside},
-        {"an unmap of the import's first 2 MiB run", 0, run, true, run, bytes, 0, 0},
-        {"an unmap of 1440 KiB at the start of the import's first 2 MiB run", 0, 1440ull << 10u, true, 1440ull << 10u, bytes, 0, 0},
+        {"a page made inaccessible inside the import, nearer its start", inside + guard, guard, false, false, inside + 2 * guard, bytes, 0, inside + guard},
+        {"a page made inaccessible inside the import, nearer its end", bytes - inside - 2 * guard, guard, false, false, 0, bytes - inside - 2 * guard, bytes - inside - guard, bytes},
+        {"an unmap of a 2 MiB run inside the import", inside, run, true, false, inside + run, bytes, 0, inside},
+        {"an unmap of the import's first 2 MiB run", 0, run, true, false, run, bytes, 0, 0},
+        {"an unmap of 1440 KiB at the start of the import's first 2 MiB run", 0, 1440ull << 10u, true, true, 1440ull << 10u, bytes, 0, 0},
     }};
     struct Backing {
         void* mapping = nullptr;
@@ -2951,11 +2970,11 @@ int hostImportCutTests(const Device& device) {
         const auto* kept = HostImportFor(context, begin, static_cast<std::size_t>(end - begin));
         Require(kept != nullptr && kept->base == begin && kept->base + kept->bytes == end, name + ": the larger side is not imported whole");
         Require(kept->memoryBase == begin && kept->pinnedBytes == end - begin, "the side of " + name + " is served from the import that pinned the changed host range");
-        requireImportServesGuest(context, recorder, *kept, begin, end, ++salt, "the larger side of " + name);
+        requireImportServesGuest(context, recorder, *kept, begin, end, ++salt, "the larger side of " + name, test.expectCompared);
         if (test.smallerEnd != test.smaller) {
             const auto* smaller = HostImportFor(context, address + test.smaller, test.smallerEnd - test.smaller);
             Require(smaller != nullptr && smaller->base == address + test.smaller && smaller->bytes == test.smallerEnd - test.smaller && smaller->memoryBase == address + test.smaller && smaller->pinnedBytes == test.smallerEnd - test.smaller, "the smaller side of " + name + " is not imported apart from the larger one");
-            requireImportServesGuest(context, recorder, *smaller, address + test.smaller, address + test.smallerEnd, ++salt, "the smaller side of " + name);
+            requireImportServesGuest(context, recorder, *smaller, address + test.smaller, address + test.smallerEnd, ++salt, "the smaller side of " + name, test.expectCompared);
             Require(HostImportFor(context, begin, static_cast<std::size_t>(end - begin)) == kept && kept->memoryBase == begin && kept->pinnedBytes == end - begin, "importing the smaller side of " + name + " replaced the safe import of the larger one");
         }
         if (test.unmap) {
@@ -2969,12 +2988,12 @@ int hostImportCutTests(const Device& device) {
             const auto* remapped = HostImportFor(context, address, bytes);
             Require(remapped != nullptr && remapped->base == address && remapped->bytes == bytes, name + ": the range mapped again is not imported whole");
             Require(remapped->memoryBase == address && remapped->pinnedBytes == bytes, "after " + name + " the pages mapped again are served from the import that pinned the old ones");
-            requireImportServesGuest(context, recorder, *remapped, from, from + test.length, ++salt, "the pages mapped again after " + name);
-            requireImportServesGuest(context, recorder, *remapped, begin, end, ++salt, "the larger side after " + name + " and a new mapping");
+            requireImportServesGuest(context, recorder, *remapped, from, from + test.length, ++salt, "the pages mapped again after " + name, test.expectCompared);
+            requireImportServesGuest(context, recorder, *remapped, begin, end, ++salt, "the larger side after " + name + " and a new mapping", test.expectCompared);
         }
         cleanup();
         gpu.unlock();
-        std::cout << "host import after cut: " << name << ": the changed import was retired before the remaining range was imported, and the GPU and write watch see the guest's bytes" << (test.unmap ? ", also after the pages were mapped again" : "") << '\n';
+        std::cout << "host import after cut: " << name << ": the changed import was retired before the remaining range was imported, and the GPU and expected write-tracking mode see the guest's bytes" << (test.unmap ? ", also after the pages were mapped again" : "") << '\n';
     };
     const auto remapWhileTrimmed = [&] {
         const std::string name = "an unmap and a new mapping of the retained side while the old import is retired";
