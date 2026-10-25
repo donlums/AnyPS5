@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - fix/windows-host-import-rewatch-cut
+      - fix/graphics-memory-compared-shared-depth
   workflow_dispatch:
 
 permissions:
@@ -96,7 +97,7 @@ jobs:
           compression-level: 0
 
   memory-regression:
-    name: Windows host-import regression
+    name: Windows AGC memory regression compilation
     if: github.repository == 'donlums/AnyPS5'
     runs-on: windows-latest
     timeout-minutes: 120
@@ -147,15 +148,41 @@ jobs:
 
       - name: Configure targeted regression-test build
         shell: cmd
-        run: cmake -S . -B build %CONFIGURE% -DBUILD_TESTING=ON
+        run: cmake -S . -B build %CONFIGURE% -DBUILD_TESTING=ON -DANYPS5_AGC_EXECUTION_TESTS=DepthComparedShared
 
-      - name: Build only the AGC recorder regression executable
+      - name: Compile AGC libraries and graphics memory regression tests
         shell: cmd
-        run: cmake --build build --target agc_driver_recorder_tests --parallel 4
+        run: cmake --build build --target libs agc_driver_recorder_tests agc_driver_depth_compared_shared_tests --parallel 4
 
-      - name: Check Windows host-import cut lifetime
-        shell: cmd
-        run: ctest --test-dir build -R "^agc_host_import_cut_lifetime$" -V --timeout 120 --no-tests=error
+      - name: Run GPU regressions and record whether Vulkan is available
+        shell: bash
+        run: |
+          set -o pipefail
+          set +e
+          ANYPS5_NO_SHADER_CACHE=1 ctest --test-dir build -R '^(agc_host_import_cut_lifetime|agc_driver_depth_compared_shared)
+      - name: Upload Windows regression logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: AnyPS5-Windows-Regression-${{ github.run_number }}
+          path: |
+            build/Testing/Temporary/LastTest.log
+            build/Testing/Temporary/LastTestsFailed.log
+          if-no-files-found: warn
+          retention-days: 14
+
+ -V --timeout 120 --no-tests=error 2>&1 | tee gpu-tests.log
+          test_status=${PIPESTATUS[0]}
+          set -e
+          if grep -Eiq 'no usable Vulkan device|Vulkan result -9|Skipped' gpu-tests.log; then
+            echo "::warning::GPU execution not validated: GitHub Windows runner has no usable Vulkan device"
+            echo '### GPU execution: NOT VALIDATED (no Vulkan device)' >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$test_status" -ne 0 ]; then
+            echo '### GPU execution: FAILED (see test logs)' >> "$GITHUB_STEP_SUMMARY"
+            exit "$test_status"
+          else
+            echo '### GPU execution: PASSED' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload Windows regression logs
         if: always()
