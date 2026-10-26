@@ -1,3 +1,10 @@
+if(BUILD_TESTING)
+    add_executable(agc_write_back_completion_tests tests/WriteBackCompletion.cpp)
+    target_include_directories(agc_write_back_completion_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    add_test(NAME agc_write_back_completion COMMAND agc_write_back_completion_tests)
+    set_tests_properties(agc_write_back_completion PROPERTIES TIMEOUT 15)
+endif()
+
 function(ensure_agc_glslang)
     if(TARGET glslang AND TARGET SPIRV AND TARGET glslang-standalone)
         return()
