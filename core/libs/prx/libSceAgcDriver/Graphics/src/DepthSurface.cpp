@@ -874,6 +874,17 @@ public:
             }
             if (observed != nullptr) *observed = std::move(current);
         }
+        if (collected == 0u) {
+            static const bool trace = std::getenv("APS5_TRACE_DEPTH_OWNERSHIP") != nullptr;
+            static std::atomic<unsigned> reported{0};
+            if (trace && reported.fetch_add(1, std::memory_order_relaxed) < 128) {
+                const auto count = std::count(changed.begin(), changed.end(), true);
+                std::fprintf(stderr, "[depth-owner] compared-shared address=0x%llx bytes=%zu units=%zu changed=%zu mirror=%d generation=%llu\n",
+                    static_cast<unsigned long long>(resource.baseAddress), bytes, changed.size(),
+                    static_cast<std::size_t>(count), mirrorPlane.storage != nullptr ? 1 : 0,
+                    static_cast<unsigned long long>(generation));
+            }
+        }
         return changed;
     }
 
