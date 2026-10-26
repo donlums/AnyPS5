@@ -98,6 +98,16 @@ public:
         RequireUnit(unit, value, "the original depth mapping did not see the CPU store");
     }
 
+    void FillPage(std::size_t page, float value, bool alias = false) {
+        Require(page < Bytes / Page, "the CPU depth edit is outside the mapped plane");
+        auto* values = reinterpret_cast<float*>(memory + page * Page + (alias && shared ? Bytes : 0));
+        std::fill_n(values, Page / sizeof(float), value);
+        AgcDriver::GuestMemory::BumpCollectEpoch();
+        const auto* original = reinterpret_cast<const float*>(memory + page * Page);
+        Require(std::all_of(original, original + Page / sizeof(float), [&](float held) { return held == value; }),
+            "the original mapping did not see the 4 KiB CPU store");
+    }
+
     void RequireUnit(std::size_t unit, float value, const std::string& what) const {
         const auto* original = reinterpret_cast<const float*>(memory + unit * Block);
         Require(std::all_of(original, original + UnitTexels, [&](float held) { return held == value; }), what);
@@ -223,6 +233,16 @@ void Run(AgcDriver::VulkanDevice& device, const DepthFastClearHarness::Shaders& 
     expect({false, false}, "an unchanged bind preserves pending depth 0.5");
     AgcDriver::GuestMemory::BumpCollectEpoch();
     expect({false, false}, "another unchanged epoch preserves pending depth 0.5");
+    if (share) {
+        memory.FillPage(15, 0.75f, true);
+        expect({true, false}, "a 4 KiB alias write at the left unit's edge invalidates only its 64 KiB unit");
+        Require(draw({.depthWrite = true, .depthCompare = VK_COMPARE_OP_ALWAYS}) == Width * Height,
+            kind + ": redrawing depth after the left edge page edit failed");
+        memory.FillPage(16, 0.75f, true);
+        expect({false, true}, "a 4 KiB alias write beyond the 64 KiB boundary invalidates only the right unit");
+        Require(draw({.depthWrite = true, .depthCompare = VK_COMPARE_OP_ALWAYS}) == Width * Height,
+            kind + ": redrawing depth after the right edge page edit failed");
+    }
     if (!share) {
         memory.FillUnit(0, 1.0f);
         expect({true, false}, "a same-value CPU store reloads the left unit");
