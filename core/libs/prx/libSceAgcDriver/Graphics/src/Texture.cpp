@@ -3,6 +3,7 @@
 #include "prx/libSceAgcDriver/Execution/include/CaptureTrace.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawPipeline.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/WriteBackCompletion.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/SlimMutex.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Mutex.hpp"
@@ -4125,6 +4126,17 @@ void StorageTexture::commitStoredSave(const std::vector<std::uint32_t>& units) {
             try {
                 const auto stored = bytes->Bytes();
                 for (const auto unit : units) {
+                    const bool current = CurrentWriteBackCompletion(texture->savedTicket, unit, ticket);
+                    static const bool trace = std::getenv("APS5_TRACE_DEPTH_OWNERSHIP") != nullptr;
+                    static std::atomic<unsigned> reported{0};
+                    if (trace && reported.fetch_add(1, std::memory_order_relaxed) < 128) {
+                        std::fprintf(stderr, "[depth-owner] writeback-complete address=0x%llx unit=%u ticket=%llu latest=%llu decision=%s\n",
+                            static_cast<unsigned long long>(texture->descriptor.baseAddress), unit,
+                            static_cast<unsigned long long>(ticket),
+                            static_cast<unsigned long long>(unit < texture->savedTicket.size() ? texture->savedTicket[unit] : 0),
+                            current ? "publish" : "superseded");
+                    }
+                    if (!current) continue;
                     const auto begin = texture->layerBegin(unit);
                     observer(begin, stored.subspan(static_cast<std::size_t>(begin - texture->descriptor.baseAddress), static_cast<std::size_t>(texture->layerBytes(unit))));
                 }
@@ -4151,7 +4163,7 @@ void StorageTexture::applyStoredSave(std::uint64_t ticket, const std::vector<std
     if (!bytes) return;
     const auto stored = bytes->Bytes();
     for (const auto unit : units) {
-        if (savedTicket[unit] != ticket) continue;
+        if (!CurrentWriteBackCompletion(savedTicket, unit, ticket)) continue;
         if (original.size() != guestBytes) original.resize(static_cast<std::size_t>(guestBytes));
         comparedRanges = {};
         const auto offset = static_cast<std::size_t>(layerBegin(unit) - descriptor.baseAddress);
