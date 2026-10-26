@@ -5,6 +5,7 @@ on:
     branches:
       - fix/windows-host-import-rewatch-cut
       - fix/graphics-memory-compared-shared-depth
+      - fix/graphics-memory-ownership-regressions
   workflow_dispatch:
 
 permissions:
@@ -97,7 +98,7 @@ jobs:
           compression-level: 0
 
   memory-regression:
-    name: Windows AGC graphics memory regression
+    name: Windows AGC ownership and Vulkan regressions
     if: github.repository == 'donlums/AnyPS5'
     runs-on: windows-latest
     timeout-minutes: 120
@@ -152,7 +153,13 @@ jobs:
 
       - name: Compile AGC libraries and graphics memory tests
         shell: cmd
-        run: cmake --build build --target libs agc_driver_recorder_tests agc_driver_depth_compared_shared_tests --parallel 4
+        run: cmake --build build --target libs agc_write_back_completion_tests agc_driver_recorder_tests agc_driver_depth_compared_shared_tests --parallel 4
+
+      - name: Verify write-back tickets on CPU without Vulkan
+        shell: bash
+        run: |
+          set -o pipefail
+          ctest --test-dir build -R '^agc_write_back_completion$' -V --no-tests=error --timeout 30 2>&1 | tee cpu-tests.log
 
       - name: Run GPU tests and report skipped Vulkan execution
         shell: bash
@@ -181,6 +188,7 @@ jobs:
             build/Testing/Temporary/LastTest.log
             build/Testing/Temporary/LastTestsFailed.log
             gpu-tests.log
+            cpu-tests.log
           if-no-files-found: warn
           retention-days: 14
 
